@@ -21,9 +21,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -33,6 +33,7 @@ import org.assertj.core.data.Percentage;
 import org.junit.Test;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
+
 import reactor.core.CoreSubscriber;
 import reactor.core.Scannable;
 import reactor.core.scheduler.Scheduler;
@@ -43,6 +44,7 @@ import reactor.test.subscriber.AssertSubscriber;
 import reactor.util.context.Context;
 import reactor.util.function.Tuple2;
 import reactor.util.function.Tuples;
+import reactor.util.retry.Retry;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -364,7 +366,7 @@ public class FluxRetryWhenTest {
 	@Test
 	public void inners() {
 		CoreSubscriber<Integer> actual = new LambdaSubscriber<>(null, e -> {}, null, null);
-		CoreSubscriber<Throwable> signaller = new LambdaSubscriber<>(null, e -> {}, null, null);
+		CoreSubscriber<Retry.RetrySignal> signaller = new LambdaSubscriber<>(null, e -> {}, null, null);
 		Flux<Integer> when = Flux.empty();
 		FluxRetryWhen.RetryWhenMainSubscriber<Integer> main = new FluxRetryWhen
 				.RetryWhenMainSubscriber<>(actual, signaller, when);
@@ -530,7 +532,6 @@ public class FluxRetryWhenTest {
 
 		StepVerifier.withVirtualTime(() ->
 				Flux.concat(Flux.range(0, 2), Flux.error(exception))
-				    .log()
 				    .retryBackoff(4, Duration.ofMillis(100))
 				    .elapsed()
 				    .doOnNext(elapsed -> { if (elapsed.getT2() == 0) elapsedList.add(elapsed.getT1());} )
@@ -661,15 +662,14 @@ public class FluxRetryWhenTest {
 		final Duration INIT = Duration.ofSeconds(10);
 
 		StepVerifier.withVirtualTime(() -> {
-			Function<Flux<Throwable>, Publisher<Long>> backoffFunction = FluxRetryWhen.randomExponentialBackoffFunction(
-					80, //with pure exponential, this amount of retries would overflow Duration's capacity
-					INIT,
-					EXPLICIT_MAX,
-					0d,
-					Schedulers.parallel());
+			Retry.Builder retryBuilder = Retry
+					//with pure exponential, 80 retries would overflow Duration's capacity
+					.backoff(80, INIT)
+					.maxBackoff(EXPLICIT_MAX)
+					.jitter(0d);
 
 			return Flux.error(new IllegalStateException("boom"))
-			    .retryWhen(backoffFunction);
+			    .retry(retryBuilder);
 		})
 		            .expectSubscription()
 		            .thenAwait(Duration.ofNanos(Long.MAX_VALUE))
@@ -681,16 +681,14 @@ public class FluxRetryWhenTest {
 	}
 
 	@Test
-	public void fluxRetryBackoffWithGivenScheduler() {
+	public void fluxRetryBackoffWithSpecificScheduler() {
 		VirtualTimeScheduler backoffScheduler = VirtualTimeScheduler.create();
 
 		Exception exception = new IOException("boom retry");
 
 		StepVerifier.create(
 				Flux.concat(Flux.range(0, 2), Flux.error(exception))
-				    .log()
 				    .retryBackoff(4, Duration.ofHours(1), Duration.ofHours(1), 0, backoffScheduler)
-				.doOnNext(i -> System.out.println(i + " on " + Thread.currentThread().getName()))
 		)
 		            .expectNext(0, 1) //normal output
 		            .expectNoEvent(Duration.ofMillis(100))
@@ -704,7 +702,7 @@ public class FluxRetryWhenTest {
 
 	@Test
 	public void fluxRetryBackoffRetriesOnGivenScheduler() {
-		//the fluxRetryBackoffWithGivenScheduler above is not suitable to verify the retry scheduler, as VTS is akin to immediate()
+		//the fluxRetryBackoffWithSpecificScheduler above is not suitable to verify the retry scheduler, as VTS is akin to immediate()
 		//and doesn't really change the Thread
 		Scheduler backoffScheduler = Schedulers.newSingle("backoffScheduler");
 		String main = Thread.currentThread().getName();
@@ -729,5 +727,128 @@ public class FluxRetryWhenTest {
 		finally {
 			backoffScheduler.dispose();
 		}
+	}
+
+	@Test
+	public void backoffFunctionNotTransient() {
+		Flux<Integer> source = transientErrorSource();
+
+		Function<Flux<Retry.RetrySignal>, Publisher<?>> retryFunction =
+				Retry.backoff(2, Duration.ZERO)
+				     .maxBackoff(Duration.ofMillis(100))
+				     .jitter(0d)
+				     .transientErrors(false)
+				     .get();
+
+		new FluxRetryWhen<>(source, retryFunction)
+				.as(StepVerifier::create)
+				.expectNext(3, 4)
+				.expectErrorMessage("Retries exhausted: 2/2")
+				.verify(Duration.ofSeconds(2));
+	}
+
+	@Test
+	public void backoffFunctionTransient() {
+		Flux<Integer> source = transientErrorSource();
+
+		Function<Flux<Retry.RetrySignal>, Publisher<?>> retryFunction =
+				Retry.backoff(2, Duration.ZERO)
+				     .maxBackoff(Duration.ofMillis(100))
+				     .jitter(0d)
+				     .transientErrors(true)
+				     .get();
+
+		new FluxRetryWhen<>(source, retryFunction)
+				.as(StepVerifier::create)
+				.expectNext(3, 4, 7, 8, 11, 12)
+				.expectComplete()
+				.verify(Duration.ofSeconds(2));
+	}
+
+	@Test
+	public void backoffFunctionTransientAndThenDoesntRemoveTransientNature() {
+		Flux<Integer> source = transientErrorSource();
+
+		Function<Flux<Retry.RetrySignal>, Publisher<?>> retryFunction =
+				Retry.backoff(2, Duration.ZERO)
+				     .maxBackoff(Duration.ofMillis(100))
+				     .jitter(0d)
+				     .transientErrors(true)
+				     .get()
+				     .andThen(Function.identity());
+
+		new FluxRetryWhen<>(source, retryFunction)
+				.as(StepVerifier::create)
+				.expectNext(3, 4, 7, 8, 11, 12)
+				.expectComplete()
+				.verify(Duration.ofSeconds(2));
+	}
+
+	private Flux<Integer> transientErrorSource() {
+		AtomicInteger count = new AtomicInteger();
+		return Flux.generate(sink -> {
+			int step = count.incrementAndGet();
+			switch (step) {
+				case 1:
+				case 2:
+				case 5:
+				case 6:
+				case 9:
+				case 10:
+					sink.error(new IllegalStateException("failing on step " + step));
+					break;
+				case 3: //should reset
+				case 4: //should NOT reset
+				case 7: //should reset
+				case 8: //should NOT reset
+				case 11: //should reset
+					sink.next(step);
+					break;
+				case 12:
+					sink.next(step); //should NOT reset
+					sink.complete();
+					break;
+				default:
+					sink.complete();
+					break;
+			}
+		});
+	}
+
+	@Test
+	public void gh1978() {
+		final int elementPerCycle = 3;
+		final int stopAfterCycles = 10;
+		Flux<Long> source =
+				Flux.generate(() -> new AtomicLong(0), (counter, s) -> {
+					long currentCount = counter.incrementAndGet();
+					if (currentCount % elementPerCycle == 0) {
+						s.error(new RuntimeException("Error!"));
+					}
+					else {
+						s.next(currentCount);
+					}
+					return counter;
+				});
+
+		List<Long> pauses = new ArrayList<>();
+
+		StepVerifier.withVirtualTime(() ->
+				source.retry(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1))
+				                           .maxBackoff(Duration.ofMinutes(1))
+				                           .jitter(0d)
+				                           .transientErrors(true)
+				)
+				      .take(stopAfterCycles * elementPerCycle)
+				      .elapsed()
+				      .map(Tuple2::getT1)
+				      .doOnNext(pause -> { if (pause > 500) pauses.add(pause / 1000); })
+		)
+		            .thenAwait(Duration.ofHours(1))
+		            .expectNextCount(stopAfterCycles * elementPerCycle)
+		            .expectComplete()
+		            .verify(Duration.ofSeconds(1));
+
+		assertThat(pauses).allMatch(p -> p == 1, "pause is constantly 1s");
 	}
 }
