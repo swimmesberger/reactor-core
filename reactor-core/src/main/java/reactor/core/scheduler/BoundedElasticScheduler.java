@@ -91,8 +91,8 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		CREATING.idleSinceTimestamp = -1; //consider evicted
 	}
 
-	final int maxThreadSize;
-	final int maxQueueSizePerWorker;
+	final int maxThreads;
+	final int maxTaskQueuedPerThread;
 
 	final Clock         clock;
 	final ThreadFactory factory;
@@ -112,19 +112,19 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 	 * This constructor lets define millisecond-grained TTLs and a custome {@link Clock},
 	 * which can be useful for tests.
 	 */
-	BoundedElasticScheduler(int maxThreadSize, int maxQueueSizePerWorker,
+	BoundedElasticScheduler(int maxThreads, int maxTaskQueuedPerThread,
 			ThreadFactory threadFactory, long ttlMillis, Clock clock) {
 		if (ttlMillis <= 0) {
 			throw new IllegalArgumentException("TTL must be strictly positive, was " + ttlMillis + "ms");
 		}
-		if (maxThreadSize <= 0) {
-			throw new IllegalArgumentException("maxThreadSize must be strictly positive, was " + maxThreadSize);
+		if (maxThreads <= 0) {
+			throw new IllegalArgumentException("maxThreads must be strictly positive, was " + maxThreads);
 		}
-		if (maxQueueSizePerWorker <= 0) {
-			throw new IllegalArgumentException("maxQueueSizePerWorker must be strictly positive, was " + maxQueueSizePerWorker);
+		if (maxTaskQueuedPerThread <= 0) {
+			throw new IllegalArgumentException("maxTaskQueuedPerThread must be strictly positive, was " + maxTaskQueuedPerThread);
 		}
-		this.maxThreadSize = maxThreadSize;
-		this.maxQueueSizePerWorker = maxQueueSizePerWorker;
+		this.maxThreads = maxThreads;
+		this.maxTaskQueuedPerThread = maxTaskQueuedPerThread;
 		this.factory = threadFactory;
 		this.clock = Objects.requireNonNull(clock, "A Clock must be provided");
 		this.ttlMillis = ttlMillis;
@@ -142,13 +142,14 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 	 * (or executors) can be shared by each {@link reactor.core.scheduler.Scheduler.Worker}, so each worker
 	 * can contribute to the task queue size.
 	 *
-	 * @param maxThreadSize the maximum number of backing threads to spawn, must be strictly positive
-	 * @param maxQueueSizePerWorker the maximum amount of tasks an executor can queue up
+	 * @param maxThreads the maximum number of backing threads to spawn, must be strictly positive
+	 * @param maxTaskQueuedPerThread the maximum amount of tasks an executor can queue up
 	 * @param factory the {@link ThreadFactory} to name the backing threads
 	 * @param ttlSeconds the time-to-live (TTL) of idle threads, in seconds
 	 */
-	BoundedElasticScheduler(int maxThreadSize, int maxQueueSizePerWorker, ThreadFactory factory, int ttlSeconds) {
-		this(maxThreadSize, maxQueueSizePerWorker, factory, ttlSeconds * 1000, Clock.tickSeconds(ZoneId.systemDefault()));
+	BoundedElasticScheduler(int maxThreads, int maxTaskQueuedPerThread, ThreadFactory factory, int ttlSeconds) {
+		this(maxThreads,
+				maxTaskQueuedPerThread, factory, ttlSeconds * 1000, Clock.tickSeconds(ZoneId.systemDefault()));
 	}
 
 	/**
@@ -156,7 +157,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 	 * ({@code Executors.newScheduledThreadPoolExecutor} with core and max pool size of 1).
 	 */
 	BoundedScheduledExecutorService createBoundedExecutorService() {
-		return new BoundedScheduledExecutorService(this.maxQueueSizePerWorker, this.factory);
+		return new BoundedScheduledExecutorService(this.maxTaskQueuedPerThread, this.factory);
 	}
 
 	@Override
@@ -238,11 +239,19 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 	@Override
 	public String toString() {
 		StringBuilder ts = new StringBuilder(Schedulers.BOUNDED_ELASTIC)
-				.append('(').append(maxThreadSize);
+				.append('(');
 		if (factory instanceof ReactorThreadFactory) {
-			ts.append(",\"").append(((ReactorThreadFactory) factory).get()).append('\"');
+			ts.append('\"').append(((ReactorThreadFactory) factory).get()).append("\",");
 		}
-		ts.append(')');
+		ts.append("maxThreads=").append(maxThreads)
+		  .append(",maxTaskQueuedPerThread=").append(maxTaskQueuedPerThread)
+		  .append(",ttl=");
+		if (ttlMillis < 1000) {
+			ts.append(ttlMillis).append("ms)");
+		}
+		else {
+			ts.append(ttlMillis / 1000).append("s)");
+		}
 		return ts.toString();
 	}
 
@@ -271,7 +280,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 	public Object scanUnsafe(Attr key) {
 		if (key == Attr.TERMINATED || key == Attr.CANCELLED) return isDisposed();
 		if (key == Attr.BUFFERED) return estimateSize();
-		if (key == Attr.CAPACITY) return maxThreadSize;
+		if (key == Attr.CAPACITY) return maxThreads;
 		if (key == Attr.NAME) return this.toString();
 
 		return null;
@@ -313,7 +322,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		BoundedServices(BoundedElasticScheduler parent) {
 			this.parent = parent;
 			this.clock = parent.clock;
-			this.busyQueue = new PriorityBlockingQueue<>(parent.maxThreadSize,
+			this.busyQueue = new PriorityBlockingQueue<>(parent.maxThreads,
 					Comparator.comparingInt(bs -> bs.markCount));
 			this.idleQueue = new ConcurrentLinkedDeque<>();
 		}
@@ -356,7 +365,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 					}
 					//else optimistically retry
 				}
-				else if (a < parent.maxThreadSize) {
+				else if (a < parent.maxThreads) {
 					//try to build a new resource
 					if (compareAndSet(a, a + 1)) {
 						ScheduledExecutorService s = Schedulers.decorateExecutorService(parent, parent.createBoundedExecutorService());

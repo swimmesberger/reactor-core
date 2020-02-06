@@ -16,6 +16,7 @@
 
 package reactor.core.scheduler;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -316,28 +317,28 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 	public void negativeThreadCap() {
 		assertThatIllegalArgumentException()
 				.isThrownBy(() -> new BoundedElasticScheduler(-1, Integer.MAX_VALUE, null, 1))
-				.withMessage("maxThreadSize must be strictly positive, was -1");
+				.withMessage("maxThreads must be strictly positive, was -1");
 	}
 
 	@Test
 	public void zeroThreadCap() {
 		assertThatIllegalArgumentException()
 				.isThrownBy(() -> new BoundedElasticScheduler(0, Integer.MAX_VALUE, null, 1))
-				.withMessage("maxThreadSize must be strictly positive, was 0");
+				.withMessage("maxThreads must be strictly positive, was 0");
 	}
 
 	@Test
 	public void negativeTaskCap() {
 		assertThatIllegalArgumentException()
 				.isThrownBy(() -> new BoundedElasticScheduler(1, -1, null, 1))
-				.withMessage("maxQueueSizePerWorker must be strictly positive, was -1");
+				.withMessage("maxTaskQueuedPerThread must be strictly positive, was -1");
 	}
 
 	@Test
 	public void zeroTaskCap() {
 		assertThatIllegalArgumentException()
 				.isThrownBy(() -> new BoundedElasticScheduler(1, 0, null, 1))
-				.withMessage("maxQueueSizePerWorker must be strictly positive, was 0");
+				.withMessage("maxTaskQueuedPerThread must be strictly positive, was 0");
 	}
 
 	@Test
@@ -1038,4 +1039,16 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 //		assertThat(deferredWorker.scan(Scannable.Attr.TERMINATED)).as("TERMINATED once disposed").isTrue();
 //		assertThat(deferredWorker.scan(Scannable.Attr.CANCELLED)).as("CANCELLED once disposed").isTrue();
 //	}
+
+	@Test
+	public void toStringOfTtlInSplitSeconds() {
+		String toString = afterTest.autoDispose(new BoundedElasticScheduler(1, 1, null, 1659, Clock.systemDefaultZone())).toString();
+		assertThat(toString).endsWith("ttl=1s)");
+	}
+
+	@Test
+	public void toStringOfTtlUnderOneSecond() {
+		String toString = afterTest.autoDispose(new BoundedElasticScheduler(1, 1, null, 523, Clock.systemDefaultZone())).toString();
+		assertThat(toString).endsWith("ttl=523ms)");
+	}
 }
