@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
@@ -31,7 +32,6 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import com.pivovarit.function.ThrowingRunnable;
-import org.assertj.core.data.Offset;
 import org.awaitility.Awaitility;
 import org.junit.AfterClass;
 import org.junit.Test;
@@ -381,8 +381,15 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 	}
 
 	@Test
-	public void lifoEviction() throws InterruptedException {
-		Scheduler scheduler = afterTest.autoDispose(new BoundedElasticScheduler(200, Integer.MAX_VALUE,
+	public void lifoEvictionNoThreadRegrowthLoop() throws InterruptedException {
+		for (int i = 0; i < 1000; i++) {
+			lifoEvictionNoThreadRegrowth();
+		}
+	}
+
+	@Test
+	public void lifoEvictionNoThreadRegrowth() throws InterruptedException {
+		BoundedElasticScheduler scheduler = afterTest.autoDispose(new BoundedElasticScheduler(200, Integer.MAX_VALUE,
 				r -> new Thread(r, "dequeueEviction"), 1));
 		int otherThreads = Thread.activeCount();
 		try {
@@ -391,6 +398,7 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 			int cacheCount = 100; //100 of slow tasks
 			int fastSleep = 10;   //interval between fastTask scheduling
 			int fastCount = 200;  //will schedule fast tasks up to 2s later
+
 			CountDownLatch latch = new CountDownLatch(cacheCount + fastCount);
 			for (int i = 0; i < cacheCount; i++) {
 				Mono.fromRunnable(ThrowingRunnable.unchecked(() -> Thread.sleep(cacheSleep)))
@@ -398,6 +406,9 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 				    .doFinally(sig -> latch.countDown())
 				    .subscribe();
 			}
+
+			int[] threadCountTrend = new int[fastCount + 1];
+			int threadCountChange = 1;
 
 			int oldActive = 0;
 			int activeAtBeginning = 0;
@@ -410,31 +421,42 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 
 				if (i == 0) {
 					activeAtBeginning = Thread.activeCount() - otherThreads;
+					threadCountTrend[0] = activeAtBeginning;
 					oldActive = activeAtBeginning;
-					LOGGER.info("{} threads active in round 1/{}", activeAtBeginning, fastCount);
+					LOGGER.debug("{} threads active in round 1/{}", activeAtBeginning, fastCount);
 				}
 				else if (i == fastCount - 1) {
 					activeAtEnd = Thread.activeCount() - otherThreads;
-					LOGGER.info("{} threads active in round {}/{}", activeAtEnd, i + 1, fastCount);
+					threadCountTrend[threadCountChange] = activeAtEnd;
+					LOGGER.debug("{} threads active in round {}/{}", activeAtEnd, i + 1, fastCount);
 				}
 				else {
 					int newActive = Thread.activeCount() - otherThreads;
 					if (oldActive != newActive) {
+						threadCountTrend[threadCountChange++] = newActive;
 						oldActive = newActive;
-						LOGGER.info("{} threads active in round {}/{}", oldActive, i + 1, fastCount);
+						LOGGER.debug("{} threads active in round {}/{}", newActive, i + 1, fastCount);
 					}
 				}
 				Thread.sleep(fastSleep);
 			}
 
-			assertThat(latch.await(4, TimeUnit.SECONDS)).as("latch 3s").isTrue();
-			assertThat(activeAtEnd).as("active in last round")
-			                       .isLessThan(activeAtBeginning)
-			                       .isCloseTo(1, Offset.offset(5));
+			assertThat(scheduler.estimateBusy()).as("busy at end of loop").isZero();
+
+			Awaitility.await().atMost(5, TimeUnit.SECONDS)
+			          .until(() -> {
+				          int stillIdle = scheduler.estimateIdle();
+				          return stillIdle == 0;
+			          });
+
+			System.out.println(Arrays.toString(Arrays.copyOf(threadCountTrend, threadCountChange)));
+			assertThat(threadCountTrend).isSortedAccordingTo(Comparator.reverseOrder());
 		}
 		finally {
 			scheduler.dispose();
-			LOGGER.info("{} threads active post shutdown", Thread.activeCount() - otherThreads);
+			final int postShutdown = Thread.activeCount() - otherThreads;
+			LOGGER.info("{} threads active post shutdown", postShutdown);
+			assertThat(postShutdown).as("post shutdown").isZero();
 		}
 	}
 //

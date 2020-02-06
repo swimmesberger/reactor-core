@@ -21,6 +21,7 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.List;
 import java.util.Objects;
 import java.util.PriorityQueue;
@@ -307,8 +308,9 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 	static final class BoundedServices extends AtomicInteger implements Disposable {
 
 		final BoundedElasticScheduler             parent;
-		final Clock                               clock; //duplicated so that SHUTDOWN can be instantiated and partially used
-		final ConcurrentLinkedDeque<BoundedState> idleQueue;
+		//duplicated Clock field from parent so that SHUTDOWN can be instantiated and partially used
+		final Clock                               clock;
+		final Deque<BoundedState>                 idleQueue;
 		final PriorityBlockingQueue<BoundedState> busyQueue;
 
 		//constructor for SHUTDOWN
@@ -358,7 +360,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 
 				if (!idleQueue.isEmpty()) {
 					//try to find an idle resource
-					BoundedState bs = idleQueue.poll();
+					BoundedState bs = idleQueue.pollLast();
 					if (bs != null && bs.markPicked()) {
 						busyQueue.add(bs);
 						return bs;
