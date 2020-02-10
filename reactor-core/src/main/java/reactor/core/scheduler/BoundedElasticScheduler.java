@@ -75,6 +75,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		return t;
 	};
 
+	static final int             DISPOSED = -1;
 	static final BoundedServices SHUTDOWN;
 	static final BoundedState    CREATING;
 
@@ -372,7 +373,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		BoundedState pick() {
 			for (;;) {
 				int a = get();
-				if (a == -1) {
+				if (a == DISPOSED) {
 					return CREATING; //synonym for shutdown, since the underlying executor is shut down
 				}
 
@@ -416,12 +417,12 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 
 		@Override
 		public boolean isDisposed() {
-			return get() == -1;
+			return get() == DISPOSED;
 		}
 
 		@Override
 		public void dispose() {
-			set(-1);
+			set(DISPOSED);
 			idleQueue.forEach(BoundedState::shutdown);
 			busyQueue.forEach(BoundedState::shutdown);
 		}
@@ -465,7 +466,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		boolean markPicked() {
 			for(;;) {
 				int i = MARK_COUNT.get(this);
-				if (i == -1) {
+				if (i == DISPOSED) {
 					return false; //being evicted
 				}
 				if (MARK_COUNT.compareAndSet(this, i, i + 1)) {
@@ -489,7 +490,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 			if (idleSince < 0) return false;
 			long elapsed = evictionTimestamp - idleSince;
 			if (elapsed > 0 && elapsed >= ttlMillis) {
-				if (MARK_COUNT.compareAndSet(this, 0, -1)) {
+				if (MARK_COUNT.compareAndSet(this, 0, DISPOSED)) {
 					executor.shutdownNow();
 					return true;
 				}
@@ -526,7 +527,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		 */
 		void shutdown() {
 			this.idleSinceTimestamp = -1L;
-			MARK_COUNT.set(this, -1);
+			MARK_COUNT.set(this, DISPOSED);
 			this.executor.shutdownNow();
 		}
 
