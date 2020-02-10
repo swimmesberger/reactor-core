@@ -25,6 +25,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Objects;
 import java.util.PriorityQueue;
+import java.util.Queue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ExecutionException;
@@ -106,8 +107,6 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 	volatile ScheduledExecutorService evictor;
 	static final AtomicReferenceFieldUpdater<BoundedElasticScheduler, ScheduledExecutorService> EVICTOR =
 			AtomicReferenceFieldUpdater.newUpdater(BoundedElasticScheduler.class, ScheduledExecutorService.class, "evictor");
-
-	int roundRobin;
 
 	/**
 	 * This constructor lets define millisecond-grained TTLs and a custome {@link Clock},
@@ -245,7 +244,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 			ts.append('\"').append(((ReactorThreadFactory) factory).get()).append("\",");
 		}
 		ts.append("maxThreads=").append(maxThreads)
-		  .append(",maxTaskQueuedPerThread=").append(maxTaskQueuedPerThread)
+		  .append(",maxTaskQueuedPerThread=").append(maxTaskQueuedPerThread == Integer.MAX_VALUE ? "unbounded" : maxTaskQueuedPerThread)
 		  .append(",ttl=");
 		if (ttlMillis < 1000) {
 			ts.append(ttlMillis).append("ms)");
@@ -277,6 +276,26 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		return BOUNDED_SERVICES.get(this).idleQueue.size();
 	}
 
+	/**
+	 * Best effort snapshot of the remaining queue capacity for pending tasks across all the backing executors.
+	 *
+	 * @return the total task capacity, or {@literal -1} if any backing executor's task queue size cannot be instrumented
+	 */
+	int estimateRemainingTaskCapacity() {
+		Queue<BoundedState> busyQueue = BOUNDED_SERVICES.get(this).busyQueue;
+		int totalTaskCapacity = maxTaskQueuedPerThread * maxThreads;
+		for (BoundedState state : busyQueue) {
+			int stateQueueSize = state.estimateQueueSize();
+			if (stateQueueSize >= 0) {
+				totalTaskCapacity -= stateQueueSize;
+			}
+			else {
+				return -1;
+			}
+		}
+		return totalTaskCapacity;
+	}
+
 	@Override
 	public Object scanUnsafe(Attr key) {
 		if (key == Attr.TERMINATED || key == Attr.CANCELLED) return isDisposed();
@@ -291,8 +310,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 	public Stream<? extends Scannable> inners() {
 		BoundedServices services = BOUNDED_SERVICES.get(this);
 		return Stream.concat(services.busyQueue.stream(), services.idleQueue.stream())
-		             .filter(obj -> obj != null && obj != CREATING)
-		             .map(exec -> key -> Schedulers.scanExecutor(exec.executor, key));
+		             .filter(obj -> obj != null && obj != CREATING);
 	}
 
 	@Override
@@ -352,7 +370,7 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		 * @return the picked {@link BoundedState}
 		 */
 		BoundedState pick() {
-			for (int i = 0; i < 1_000_000_000; i++) {
+			for (;;) {
 				int a = get();
 				if (a == -1) {
 					return CREATING; //synonym for shutdown, since the underlying executor is shut down
@@ -389,7 +407,6 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 					//else optimistically retry
 				}
 			}
-			return CREATING;
 		}
 
 		void setIdle(BoundedState boundedState) {
@@ -427,6 +444,16 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		BoundedState(BoundedServices parent, ScheduledExecutorService executor) {
 			this.parent = parent;
 			this.executor = executor;
+		}
+
+		/**
+		 * @return the queue size if the executor is a {@link ScheduledThreadPoolExecutor}, -1 otherwise
+		 */
+		int estimateQueueSize() {
+			if (executor instanceof ScheduledThreadPoolExecutor) {
+				return ((ScheduledThreadPoolExecutor) executor).getQueue().size();
+			}
+			return -1;
 		}
 
 		/**
@@ -547,7 +574,8 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 	 * lead Doug Lea's tip for enforcing a bound via {@link
 	 * ScheduledThreadPoolExecutor#getQueue()}.
 	 */
-	static final class BoundedScheduledExecutorService extends ScheduledThreadPoolExecutor {
+	static final class BoundedScheduledExecutorService extends ScheduledThreadPoolExecutor
+			implements Scannable {
 
 		final int queueCapacity;
 
@@ -563,14 +591,28 @@ final class BoundedElasticScheduler implements Scheduler, Scannable {
 		}
 
 		@Override
+		public Object scanUnsafe(Attr key) {
+			if (Attr.TERMINATED == key) return isTerminated();
+			if (Attr.BUFFERED == key) return getQueue().size();
+			if (Attr.CAPACITY == key) return this.queueCapacity;
+			return null;
+		}
+
+		@Override
 		public String toString() {
 			int queued = getQueue().size();
 			long completed = getCompletedTaskCount();
 			String state = getActiveCount() > 0 ? "ACTIVE" : "IDLE";
+			if (this.queueCapacity == Integer.MAX_VALUE) {
+				return "BoundedScheduledExecutorService{" + state + ", queued=" + queued + "/unbounded, completed=" + completed + '}';
+			}
 			return "BoundedScheduledExecutorService{" + state + ", queued=" + queued + "/" + queueCapacity + ", completed=" + completed + '}';
 		}
 
 		private void ensureQueueCapacity(int taskCount) {
+			if (queueCapacity == Integer.MAX_VALUE) {
+				return;
+			}
 			int queueSize = super.getQueue().size();
 			if ((queueSize + taskCount) > queueCapacity) {
 				throw Exceptions.failWithRejected("Task capacity of bounded elastic scheduler reached while scheduling " + taskCount + " tasks (" + (queueSize + taskCount) + "/" + queueCapacity + ")");
