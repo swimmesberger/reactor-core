@@ -665,7 +665,8 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 	}
 
 	@Test
-	public void estimateRemainingTaskCapacityResetWhenWorkerTaskIsDisposed() {
+	public void estimateRemainingTaskCapacityResetWhenWorkerTaskIsDisposed()
+			throws InterruptedException {
 		BoundedElasticScheduler boundedElasticScheduler = afterTest.autoDispose(new BoundedElasticScheduler(1, 1, Thread::new, 10));
 		Worker worker = afterTest.autoDispose(boundedElasticScheduler.createWorker());
 		CountDownLatch latch = new CountDownLatch(1);
@@ -690,14 +691,14 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 	}
 
 	@Test
-	public void taskPutInPendingQueueCanBeRemovedOnCancel() {
+	public void taskPutInPendingQueueCanBeRemovedOnCancel() throws InterruptedException {
 		BoundedElasticScheduler boundedElasticScheduler = afterTest.autoDispose(new BoundedElasticScheduler(1, 1, Thread::new, 10));
 		Worker worker = afterTest.autoDispose(boundedElasticScheduler.createWorker());
-
+		AtomicBoolean ranTask = new AtomicBoolean();
 		CountDownLatch latch = new CountDownLatch(1);
 
-		//enqueue blocking task on worker
-		Disposable task1 = worker.schedule(() -> {
+		//block worker
+		worker.schedule(() -> {
 			try {
 				latch.await(5, TimeUnit.SECONDS);
 			}
@@ -705,19 +706,29 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 				e.printStackTrace();
 			}
 		});
+		Thread.sleep(10); //small window to start the first task
+		//enqueue task on worker
+		Disposable task = worker.schedule(() -> ranTask.set(true));
 
-		AtomicBoolean ranSecond = new AtomicBoolean();
-		Disposable task2 = worker.schedule(() -> ranSecond.set(true));
+		assertThat(ranTask).as("is pending execution").isFalse();
 
-		assertThat(ranSecond).as("is pending execution").isFalse();
-		assertThat(boundedElasticScheduler.estimateRemainingTaskCapacity()).as("queue full").isZero();
+		Awaitility.with().pollInterval(50, TimeUnit.MILLISECONDS)
+		          .await().atMost(100, TimeUnit.MILLISECONDS)
+		          .untilAsserted(() -> assertThat(boundedElasticScheduler.estimateRemainingTaskCapacity())
+				          .as("queue full")
+				          .isZero()
+		          );
 
-		task2.dispose();
+		task.dispose();
 
-		assertThat(boundedElasticScheduler.estimateRemainingTaskCapacity()).as("queue cleared").isOne();
+		Awaitility.with().pollInterval(50, TimeUnit.MILLISECONDS)
+		          .await().atMost(100, TimeUnit.MILLISECONDS)
+		          .untilAsserted(() -> assertThat(boundedElasticScheduler.estimateRemainingTaskCapacity())
+				          .as("queue cleared").isOne());
 
 		latch.countDown();
-		assertThat(ranSecond).as("didn't run after task1 done").isFalse();
+		Thread.sleep(100);
+		assertThat(ranTask).as("not executed after latch countdown").isFalse();
 	}
 
 	@Test
@@ -1157,7 +1168,7 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 			bounded.schedule(() -> {}, 100, TimeUnit.MILLISECONDS);
 			unbounded.schedule(() -> {}, 100, TimeUnit.MILLISECONDS);
 
-			Thread.sleep(10); //give a small window for the task to be picked from the queue
+			Thread.sleep(10); //give a small window for the task to be picked from the queue and completed
 
 			assertThat(bounded).hasToString("BoundedScheduledExecutorService{IDLE, queued=1/123, completed=1}");
 			assertThat(unbounded).hasToString("BoundedScheduledExecutorService{IDLE, queued=1/unbounded, completed=1}");
@@ -1177,7 +1188,7 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 			bounded.submit(ThrowingRunnable.unchecked(() -> Thread.sleep(1000)));
 			unbounded.submit(ThrowingRunnable.unchecked(() -> Thread.sleep(1000)));
 
-			Thread.sleep(10); //give a small window for the task to be picked from the queue
+			Thread.sleep(10); //give a small window for the task to be picked from the queue to reflect active
 
 			assertThat(bounded).hasToString("BoundedScheduledExecutorService{ACTIVE, queued=0/123, completed=0}");
 			assertThat(unbounded).hasToString("BoundedScheduledExecutorService{ACTIVE, queued=0/unbounded, completed=0}");
