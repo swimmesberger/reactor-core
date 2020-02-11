@@ -44,6 +44,7 @@ import reactor.util.context.Context;
  * @see <a href="https://github.com/reactor/reactive-streams-commons">Reactive-Streams-Commons</a>
  */
 final class FluxPublish<T> extends ConnectableFlux<T> implements Scannable {
+	private static final Consumer<Object> EMPTY_CONSUMER = i -> {};
 
 	/**
 	 * The source observable.
@@ -57,6 +58,11 @@ final class FluxPublish<T> extends ConnectableFlux<T> implements Scannable {
 
 	final Supplier<? extends Queue<T>> queueSupplier;
 
+	/**
+	 * Callback to inform about dropped items in initial state
+	 */
+	final Consumer<T> onItemDrop;
+
 	volatile PublishSubscriber<T> connection;
 	@SuppressWarnings("rawtypes")
 	static final AtomicReferenceFieldUpdater<FluxPublish, PublishSubscriber> CONNECTION =
@@ -65,14 +71,22 @@ final class FluxPublish<T> extends ConnectableFlux<T> implements Scannable {
 					"connection");
 
 	FluxPublish(Flux<? extends T> source,
+				int prefetch,
+				Supplier<? extends Queue<T>> queueSupplier) {
+		this(source, prefetch, queueSupplier, null);
+	}
+
+	FluxPublish(Flux<? extends T> source,
 			int prefetch,
-			Supplier<? extends Queue<T>> queueSupplier) {
+			Supplier<? extends Queue<T>> queueSupplier,
+			Consumer<T> onItemDrop) {
 		if (prefetch <= 0) {
 			throw new IllegalArgumentException("bufferSize > 0 required but it was " + prefetch);
 		}
 		this.source = Objects.requireNonNull(source, "source");
 		this.prefetch = prefetch;
 		this.queueSupplier = Objects.requireNonNull(queueSupplier, "queueSupplier");
+		this.onItemDrop = onItemDrop == null ? emptyConsumer() : onItemDrop;
 	}
 
 	@Override
@@ -82,7 +96,7 @@ final class FluxPublish<T> extends ConnectableFlux<T> implements Scannable {
 		for (; ; ) {
 			s = connection;
 			if (s == null || s.isTerminated()) {
-				PublishSubscriber<T> u = new PublishSubscriber<>(prefetch, this);
+				PublishSubscriber<T> u = new PublishSubscriber<>(prefetch, this, onItemDrop);
 
 				if (!CONNECTION.compareAndSet(this, s, u)) {
 					continue;
@@ -112,7 +126,7 @@ final class FluxPublish<T> extends ConnectableFlux<T> implements Scannable {
 
 			PublishSubscriber<T> c = connection;
 			if (c == null || c.isTerminated()) {
-				PublishSubscriber<T> u = new PublishSubscriber<>(prefetch, this);
+				PublishSubscriber<T> u = new PublishSubscriber<>(prefetch, this, onItemDrop);
 				if (!CONNECTION.compareAndSet(this, c, u)) {
 					continue;
 				}
@@ -147,12 +161,23 @@ final class FluxPublish<T> extends ConnectableFlux<T> implements Scannable {
 		return null;
 	}
 
+	@Override
+	public FluxPublish<T> doOnDrop(Consumer<T> onItemDrop) {
+		return new FluxPublish<>(source, prefetch, queueSupplier, this.onItemDrop.andThen(onItemDrop));
+	}
+
+	private static <E> Consumer<E> emptyConsumer() {
+		return (Consumer<E>) EMPTY_CONSUMER;
+	}
+
 	static final class PublishSubscriber<T>
 			implements InnerConsumer<T>, Disposable {
 
 		final int prefetch;
 
 		final FluxPublish<T> parent;
+
+		final Consumer<T> onItemDrop;
 
 		volatile Subscription s;
 		@SuppressWarnings("rawtypes")
@@ -203,10 +228,15 @@ final class FluxPublish<T> extends ConnectableFlux<T> implements Scannable {
 						Throwable.class,
 						"error");
 
-		@SuppressWarnings("unchecked")
 		PublishSubscriber(int prefetch, FluxPublish<T> parent) {
+			this(prefetch, parent, emptyConsumer());
+		}
+
+		@SuppressWarnings("unchecked")
+		PublishSubscriber(int prefetch, FluxPublish<T> parent, Consumer<T> onItemDrop) {
 			this.prefetch = prefetch;
 			this.parent = parent;
+			this.onItemDrop = onItemDrop;
 			SUBSCRIBERS.lazySet(this, INIT);
 		}
 
@@ -434,6 +464,10 @@ final class FluxPublish<T> extends ConnectableFlux<T> implements Scannable {
 						if (checkTerminated(d, v == null)) {
 							return;
 						}
+
+						// inform the callback about the discarded element
+						this.onItemDrop.accept(v);
+
 						if (sourceMode != Fuseable.SYNC) {
 							s.request(1);
 						}

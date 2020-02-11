@@ -16,6 +16,7 @@
 package reactor.core.publisher;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CancellationException;
@@ -747,5 +748,53 @@ public class FluxPublishTest extends FluxOperatorTest<String, String> {
 		           .subscribe();
 
 		assertThat((int) reference.get().get(key)).isEqualTo(expectedValue);
+	}
+
+	@Test
+	public void verifyCancelQueued() {
+		AtomicInteger discardCount = new AtomicInteger(0);
+
+		TestPublisher<Integer> publisher = TestPublisher.create();
+		ConnectableFlux<Integer> connectableFlux = publisher.flux().doOnDiscard(Integer.class, i -> discardCount.getAndIncrement()).publish();
+		connectableFlux.connect();
+
+		StepVerifier.create(connectableFlux)
+				.expectSubscription()
+				.then(() -> publisher.next(99))
+				.expectNext(99)
+				.thenCancel()
+				.verify();
+
+		publisher.next(1);
+		publisher.next(2);
+		publisher.next(3);
+
+		StepVerifier.create(connectableFlux)
+				.expectSubscription()
+				.expectNext(1, 2, 3)
+				.thenCancel()
+				.verify();
+	}
+
+	@Test
+	public void verifyInitialDiscard() {
+		List<Integer> discardedElements = new ArrayList<>();
+
+		TestPublisher<Integer> publisher = TestPublisher.create();
+		ConnectableFlux<Integer> connectableFlux = publisher.flux().publish();
+		connectableFlux = connectableFlux.doOnDrop(discardedElements::add);
+		connectableFlux.connect();
+
+		publisher.next(1);
+		publisher.next(2);
+		publisher.next(3);
+
+		StepVerifier.create(connectableFlux)
+				.expectSubscription()
+				.expectNextCount(0)
+				.thenCancel()
+				.verify();
+
+		assertThat(discardedElements).isEqualTo(Arrays.asList(1,2,3));
 	}
 }

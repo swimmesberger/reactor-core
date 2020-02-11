@@ -1077,6 +1077,12 @@ final class FluxReplay<T> extends ConnectableFlux<T> implements Scannable, Fusea
 	}
 
 	@Override
+	public ConnectableFlux<T> doOnDrop(Consumer<T> dropHook) {
+		// noop
+		return this;
+	}
+
+	@Override
 	public final CoreSubscriber<? super T> subscribeOrReturn(CoreSubscriber<? super T> actual) {
 		boolean expired;
 		for (; ; ) {

@@ -188,6 +188,21 @@ public abstract class ConnectableFlux<T> extends Flux<T> {
 		return onAssembly(new FluxRefCountGrace<>(this, minSubscribers, gracePeriod, scheduler));
 	}
 
+	/**
+	 * Adds a onDrop callback to the flux which will be called when items are dropped because there is no demand in
+	 * terms of subscriptions.
+	 *
+	 * Calls to this method are additive, and the order of invocation of the {@code doOnDrop}
+	 * is the same as the order of declaration (calling {@code .publish(...).doOnDrop(first).doOnDrop(second)}
+	 * will let the operator invoke {@code first} then {@code second} handlers).
+	 *
+	 * Currently this operator is only meaningfully implemented in {@link FluxPublish}
+	 *
+	 * @param dropHook a {@link Consumer} of elements that performs the cleanup.
+	 * @return a {@link Flux} that cleans up matching elements that get dropped.
+	 */
+	public abstract ConnectableFlux<T> doOnDrop(Consumer<T> dropHook);
+
 	static final Consumer<Disposable> NOOP_DISCONNECT = runnable -> {
 
 	};

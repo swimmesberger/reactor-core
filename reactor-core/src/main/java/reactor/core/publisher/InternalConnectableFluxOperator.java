@@ -21,6 +21,8 @@ import reactor.core.CoreSubscriber;
 import reactor.core.Scannable;
 import reactor.util.annotation.Nullable;
 
+import java.util.function.Consumer;
+
 abstract class InternalConnectableFluxOperator<I, O> extends ConnectableFlux<O> implements Scannable,
                                                                                            OptimizableOperator<O, I> {
 
@@ -78,5 +80,11 @@ abstract class InternalConnectableFluxOperator<I, O> extends ConnectableFlux<O> 
 		if (key == Scannable.Attr.PREFETCH) return getPrefetch();
 		if (key == Scannable.Attr.PARENT) return source;
 		return null;
+	}
+
+	@Override
+	public ConnectableFlux<O> doOnDrop(Consumer<O> dropHook) {
+		// noop
+		return this;
 	}
 }
