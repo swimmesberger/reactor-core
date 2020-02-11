@@ -758,9 +758,9 @@ public class BoundedElasticSchedulerTest extends AbstractSchedulerTest {
 				e.printStackTrace();
 			}
 		});
-
+		Thread.sleep(10); //small window to start the first task
 		AtomicBoolean ranSecond = new AtomicBoolean();
-		Disposable task2 = worker.schedule(() -> ranSecond.set(true));
+		Disposable task = worker.schedule(() -> ranSecond.set(true));
 
 		assertThat(ranSecond).as("is pending execution").isFalse();
 		assertThat(boundedElasticScheduler.estimateRemainingTaskCapacity()).as("queue full").isZero();
